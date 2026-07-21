@@ -5,14 +5,15 @@ import json
 import argparse
 import threading
 from pathlib import Path
-import pdfplumber
+import fitz  # PyMuPDF
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from sansad_decoder import SansadDecoder
 
 PDF_DIR = Path("downloads/debates")
 CORPUS_DIR = Path("corpus/final")
 
-def process_pdf(pdf_path, total, lock, stats):
+def process_pdf(pdf_path, total, lock, stats, force=False):
     date_str = pdf_path.stem  # YYYY-MM-DD
     year_str = date_str.split("-")[0]
     
@@ -20,8 +21,8 @@ def process_pdf(pdf_path, total, lock, stats):
     txt_path = out_dir / f"{date_str}.txt"
     json_path = out_dir / f"{date_str}.json"
     
-    # Resume support: skip if output txt and json both exist and are valid
-    if txt_path.exists() and json_path.exists():
+    # Resume support: skip if output txt and json both exist and are valid (unless --force)
+    if not force and txt_path.exists() and json_path.exists():
         if txt_path.stat().st_size > 0 and json_path.stat().st_size > 0:
             try:
                 meta = json.loads(json_path.read_text(encoding="utf-8"))
@@ -42,13 +43,15 @@ def process_pdf(pdf_path, total, lock, stats):
     try:
         page_texts = []
         
-        with pdfplumber.open(pdf_path) as pdf:
-            total_doc_pages = len(pdf.pages)
+        with fitz.open(pdf_path) as doc:
+            total_doc_pages = len(doc)
             
-            for idx, page in enumerate(pdf.pages):
-                # Extract text using pdfplumber's layout-preserving normal extraction
-                page_text = page.extract_text() or ""
-                page_texts.append(page_text)
+            for idx, page in enumerate(doc):
+                # Extract text using PyMuPDF (fitz)
+                page_text = page.get_text() or ""
+                # Decode using SansadDecoder
+                decoded_text = SansadDecoder.decode(page_text, pdf_path=pdf_path)
+                page_texts.append(decoded_text)
                 
         # Format output text: join pages with standard marker format
         text_parts = []
@@ -91,8 +94,9 @@ def process_pdf(pdf_path, total, lock, stats):
             tqdm.write(f"Failed to process {pdf_path.name}: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Clean layout-preserving multilingual text extraction using pdfplumber")
+    parser = argparse.ArgumentParser(description="Clean layout-preserving multilingual text extraction using PyMuPDF")
     parser.add_argument("--workers", type=int, default=8, help="Number of concurrent PDF threads")
+    parser.add_argument("--force", action='store_true', help="Reprocess all PDFs, ignoring cached txt/json files")
     args = parser.parse_args()
 
     if not PDF_DIR.exists():
@@ -103,7 +107,7 @@ def main():
     total_pdfs = len(pdf_paths)
     
     print(f"Found {total_pdfs} PDF files to process.")
-    print(f"Configuration: workers={args.workers} (pdfplumber)")
+    print(f"Configuration: workers={args.workers}, force={args.force} (PyMuPDF)")
     
     stats = {
         "completed": 0,
@@ -121,7 +125,7 @@ def main():
     
     # Process files concurrently using configured threads and display tqdm progress bar
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [executor.submit(process_pdf, path, total_pdfs, lock, stats) for path in pdf_paths]
+        futures = [executor.submit(process_pdf, path, total_pdfs, lock, stats, args.force) for path in pdf_paths]
         
         with tqdm(total=total_pdfs, desc="Extracting Corpus", unit="pdf") as pbar:
             for future in as_completed(futures):
